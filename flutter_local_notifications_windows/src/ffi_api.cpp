@@ -21,8 +21,26 @@ NativePlugin* createPlugin() { return new NativePlugin(); }
 
 void disposePlugin(NativePlugin* plugin) { delete plugin; }
 
+// TEST ONLY (Seally bench, never merged): when SEALLY_TEST_NOTIFIER_DISCONNECTED=1 is set at launch,
+// the handles behave as disconnected until they are created again, so the recovery path runs on
+// demand. The first creation (in init) keeps them "dead"; the recreation in withHandles revives them.
+static bool simulatedCreations = false;
+static bool simulatedDead = false;
+
+static bool simulateDisconnect() {
+  char value[2] = {0};
+  return GetEnvironmentVariableA("SEALLY_TEST_NOTIFIER_DISCONNECTED", value, sizeof(value)) == 1
+    && value[0] == '1';
+}
+
 /// (Re)creates the WinRT handles used to show and manage notifications.
 static void createHandles(NativePlugin* plugin) {
+  if (!simulatedCreations) {
+    simulatedCreations = true;
+    simulatedDead = simulateDisconnect();
+  } else {
+    simulatedDead = false;
+  }
   plugin->notifier = plugin->hasIdentity
     ? ToastNotificationManager::CreateToastNotifier()
     : ToastNotificationManager::CreateToastNotifier(plugin->aumid);
@@ -110,6 +128,7 @@ bool showNotification(NativePlugin* plugin, int id, char* xml, NativeStringMap b
     const auto data = dataFromMap(bindings);
     notification.Tag(winrt::to_hstring(id));
     notification.Data(data);
+    if (simulatedDead) throw winrt::hresult_error(CO_E_OBJNOTCONNECTED);
     plugin->notifier.value().Show(notification);
   });
 }
