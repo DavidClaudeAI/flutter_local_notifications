@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <vector>
 
 #include <windows.h>  // <-- This must be the first Windows header
@@ -48,21 +49,45 @@ static bool isDisconnected(const winrt::hresult_error& error) {
 /// An exception that crosses the FFI boundary cannot be caught on the Dart side: it terminates the
 /// process. If the handles are disconnected, they are created again and [action] is retried once.
 /// Returns false if [action] could not complete.
+// SEALLY ONLY (not in the upstream PR): one line on stderr for every failure and every recovery,
+// so the app's native journal shows whether the fix ever ran. No notification content is written.
+static void journal(const char* what, HRESULT code) {
+  SYSTEMTIME now;
+  GetLocalTime(&now);
+  fprintf(
+    stderr, "%04d-%02d-%02d %02d:%02d:%02d.%03d [flutter_local_notifications_windows] %s (0x%08lX)\n",
+    now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds, what,
+    static_cast<unsigned long>(code)
+  );
+  fflush(stderr);
+}
+
 template <typename Action>
 static bool withHandles(NativePlugin* plugin, Action action) {
+  HRESULT first = S_OK;
   try {
     action();
     return true;
   } catch (const winrt::hresult_error& error) {
-    if (!isDisconnected(error)) return false;
+    first = error.code();
+    if (!isDisconnected(error)) {
+      journal("call failed, not a disconnection: reported to Dart", first);
+      return false;
+    }
   } catch (...) {
+    journal("call failed with a non-WinRT exception: reported to Dart", E_FAIL);
     return false;
   }
   try {
     createHandles(plugin);
     action();
+    journal("notifier disconnected: recreated, call retried and succeeded", first);
     return true;
+  } catch (const winrt::hresult_error& error) {
+    journal("notifier disconnected: recreated, retry failed: reported to Dart", error.code());
+    return false;
   } catch (...) {
+    journal("notifier disconnected: recreated, retry failed: reported to Dart", E_FAIL);
     return false;
   }
 }
@@ -79,8 +104,12 @@ bool init(
     plugin->hasIdentity = hasPackageIdentity();
     plugin->aumid = winrt::to_hstring(aumId);
     createHandles(plugin);
-  } catch (...) {
+  } catch (const winrt::hresult_error& error) {
     // The notification platform can be unavailable at launch. Report it instead of terminating.
+    journal("init failed: notifications unavailable until the app restarts", error.code());
+    return false;
+  } catch (...) {
+    journal("init failed: notifications unavailable until the app restarts", E_FAIL);
     return false;
   }
   plugin->isReady = true;
